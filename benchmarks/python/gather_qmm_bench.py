@@ -80,5 +80,29 @@ def time_gather_qmm():
     time_fn(equivalent_matmul, x, w1, w2)
 
 
+def time_gather_qmm_short_runs():
+    # MoE-prefill regime: many experts, so each expert sees only a few rows
+    # (here 512 * 8 / 256 = 16). Exercises the block-size choice in the
+    # gather_qmm_rhs kernels, where a tile taller than the average run
+    # discards most of its arithmetic.
+    N, E, I = 512, 256, 8
+    x = mx.random.normal((N, 1, 1, D)) / 1024**0.5
+    w1 = mx.random.normal((E, M, D)) / 1024**0.5
+    w2 = mx.random.normal((E, D, M)) / 1024**0.5
+    w1 = mx.quantize(w1)
+    w2 = mx.quantize(w2)
+    indices = (mx.random.uniform(shape=(N, I)) * E).astype(mx.uint32)
+    mx.eval(x, w1, w2, indices)
+
+    def gather_mm(x, w1, w2, indices):
+        x, idx, inv_order = gather_sort(x, indices)
+        x = mx.gather_qmm(x, *w1, transpose=True, rhs_indices=idx, sorted_indices=True)
+        x = mx.gather_qmm(x, *w2, transpose=True, rhs_indices=idx, sorted_indices=True)
+        return scatter_unsort(x, inv_order, indices.shape)
+
+    time_fn(gather_mm, x, w1, w2, indices)
+
+
 if __name__ == "__main__":
     time_gather_qmm()
+    time_gather_qmm_short_runs()

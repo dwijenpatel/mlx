@@ -1454,8 +1454,16 @@ void gather_qmm_rhs_nax(
   array w = ensure_row_contiguous(w_, d, s);
   array scales = ensure_row_contiguous(scales_, d, s);
 
-  // TODO: Tune the block sizes
-  int bm = 64, bn = 64, bk = 64;
+  // The kernel re-runs its K loop once per distinct expert inside a BM-row
+  // tile and stores only that expert's slice, so useful arithmetic is
+  // roughly min(1, rows_per_expert / BM) while weight traffic is unchanged
+  // by BM. When the average run is shorter than 64 rows (e.g. MoE prefill
+  // with many experts: rows_per_expert = tokens * top_k / num_experts),
+  // a 32-row tile keeps more of the arithmetic without adding bandwidth.
+  int num_experts = w.size() / w.shape(-1) / w.shape(-2);
+  int rows_per_expert = num_experts > 0 ? M / num_experts : M;
+  int bm = rows_per_expert < 64 ? 32 : 64;
+  int bn = 64, bk = 64;
   int wm = 2, wn = 2;
 
   const bool align_M = (M % bm) == 0;

@@ -462,22 +462,34 @@ void sdpa_vector_2pass(
     bool do_causal,
     const std::optional<array>& mask,
     const std::optional<array>& sinks) {
-  // Compute the necessary sizes
   int gqa_factor = q.shape(1) / k.shape(1);
+  int qk_dim = q.shape(-1);
+
+  // Heads per thread for the GQA kernel, which reads each K/V element
+  // G / HPT times; HPT is capped by its G * HPT * V float partials in
+  // threadgroup memory. Unsupported shapes keep the plain 2-pass kernel.
+  int gqa_hpt = 0;
+  if (qk_dim == v.shape(-1)) {
+    if (gqa_factor == 8) {
+      gqa_hpt = qk_dim == 64 ? 8 : qk_dim == 128 ? 4 : qk_dim == 256 ? 2 : 0;
+    } else if (gqa_factor == 6 && qk_dim == 256) {
+      gqa_hpt = 3;
+    } else if (gqa_factor == 4 && (qk_dim == 64 || qk_dim == 128)) {
+      gqa_hpt = 4;
+    } else if (gqa_factor == 2 && qk_dim == 256) {
+      gqa_hpt = 2;
+    }
+  }
 
   // Set the kernel name
   std::string kname;
   kname.reserve(64);
   kname += "sdpa_vector_2pass_1";
-  const int qk_dim = q.shape(-1);
-  if (!mask && !sinks && q.shape(2) == 1 && gqa_factor == 8 &&
-      q.shape(-1) == v.shape(-1) &&
-      (qk_dim == 64 || qk_dim == 128 || qk_dim == 256) && k.shape(2) >= 8192) {
-    // Heads per thread: sized so the partials buffer (G * HPT * V floats)
-    // stays within the 32 KB threadgroup memory limit.
-    const int hpt = qk_dim == 64 ? 8 : (qk_dim == 128 ? 4 : 2);
-    kname += "_gqa8_hpt";
-    kname += std::to_string(hpt);
+  if (!mask && !sinks && q.shape(2) == 1 && gqa_hpt > 0 && k.shape(2) >= 8192) {
+    kname += "_gqa";
+    kname += std::to_string(gqa_factor);
+    kname += "_hpt";
+    kname += std::to_string(gqa_hpt);
   }
   kname += "_";
   kname += get_type_string(q.dtype());
@@ -485,6 +497,8 @@ void sdpa_vector_2pass(
   kname += std::to_string(q.shape(-1));
   kname += "_";
   kname += std::to_string(v.shape(-1));
+
+  // Compute the necessary sizes
   int n_simds = gqa_factor * q.shape(2);
 
   char devc = d.get_architecture().back();

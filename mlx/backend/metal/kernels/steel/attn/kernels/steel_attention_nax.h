@@ -17,6 +17,9 @@ constant bool align_K [[function_constant(201)]];
 constant bool has_mask [[function_constant(300)]];
 constant bool do_causal [[function_constant(301)]];
 constant bool has_sinks [[function_constant(302)]];
+// Set by the host when it widened kL past the true KV length (chunked
+// cache); V loads must then stop at the true length.
+constant bool guard_v [[function_constant(303)]];
 
 template <typename T>
 struct TransformScale {
@@ -632,6 +635,11 @@ template <
   using stile_t = NAXTile<AccumType, TQ, TK>;
   constexpr short kEPF = stile_t::NAXFrag_t::kElemsPerFrag;
 
+  // With guard_v the host widened kL; V rows past the true length lie
+  // outside the caller's tensor and must not be read (0 * NaN = NaN).
+  // K needs no guard: the widened columns are causally masked.
+  const int kL_true = params->qL_off + params->qL;
+
   // One slot per (row group, half): a fragment pair in per-lane-linear
   // layout. Both halves share the fragment-to-lane mapping, so the
   // exchange needs no coordinate math.
@@ -658,6 +666,8 @@ template <
   // Loop over KV seq length
   for (int kb = 0; kb < kb_lim; kb++) {
     const int is_last_k = (kb == (params->NK_aligned));
+    const int v_rows = kL_true - kb * BK;
+    const bool is_last_v = guard_v ? (v_rows < BK) : (!align_K && is_last_k);
 
     stile_t Stile;
     Stile.clear();
@@ -863,9 +873,10 @@ template <
 
         const int V_load_off = ik * kU * int(params->V_strides[2]) + id * kU;
 
-        if (!align_K && is_last_k) {
+        if (is_last_v) {
+          const short v_lim = guard_v ? short(v_rows) : short(lim_rows_k);
           Vtile.load_rows(
-              V + V_load_off, int(params->V_strides[2]), lim_rows_k - ik * kU);
+              V + V_load_off, int(params->V_strides[2]), v_lim - ik * kU);
         } else {
           Vtile.load(V + V_load_off, int(params->V_strides[2]));
         }

@@ -67,10 +67,12 @@ void sdpa_full_self_attention_nax(
         (rows - 1) * st[2] + kv.shape(3);
     return kv.offset() + end * itemsize <= int64_t(kv.buffer_size());
   };
+  bool guard_v = false;
   if (split_d && do_causal_ && !mask.has_value() && (kL % bk)) {
     int kLp = bk * ((kL + bk - 1) / bk);
     if (has_backing_rows(k, kLp) && has_backing_rows(v, kLp)) {
       kL = kLp;
+      guard_v = true;
     }
   }
 
@@ -85,7 +87,8 @@ void sdpa_full_self_attention_nax(
       {&align_K, MTL::DataType::DataTypeBool, 201},
       {&has_mask, MTL::DataType::DataTypeBool, 300},
       {&do_causal, MTL::DataType::DataTypeBool, 301},
-      {&has_sinks, MTL::DataType::DataTypeBool, 302}};
+      {&has_sinks, MTL::DataType::DataTypeBool, 302},
+      {&guard_v, MTL::DataType::DataTypeBool, 303}};
 
   std::string base_name;
   concatenate(
@@ -118,7 +121,9 @@ void sdpa_full_self_attention_nax(
       "_do_causal_",
       (do_causal ? 't' : 'n'),
       "_has_sinks_",
-      (has_sinks ? 't' : 'n'));
+      (has_sinks ? 't' : 'n'),
+      "_guard_v_",
+      (guard_v ? 't' : 'n'));
 
   auto& compute_encoder = metal::get_command_encoder(s);
 

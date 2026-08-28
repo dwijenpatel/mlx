@@ -929,6 +929,35 @@ class TestFastSDPA(mlx_tests.MLXTestCase):
                         tolerance = {"rtol": 1e-2, "atol": 1e-2}
                     self.assertTrue(mx.allclose(ref, out, **tolerance))
 
+    def test_sdpa_sliced_nan_tail(self):
+        # K/V sliced from a larger buffer whose rows past the slice hold
+        # non-finite values. The D=256 causal kernel widens kL for such
+        # slices and must not read V rows past the true length
+        # (0 * nan = nan).
+        D = 256
+        scale = D**-0.5
+        T_q = 1024
+        for offset, tail in product(
+            (4097, 4103),
+            (float("nan"), float("inf")),
+        ):
+            with self.subTest(offset=offset, tail=tail):
+                q = mx.random.normal((1, 16, T_q, D), mx.float16)
+                k = mx.random.normal((1, 8, 4352, D), mx.float16)
+                v = mx.random.normal((1, 8, 4352, D), mx.float16)
+
+                k[..., offset:, :] = tail
+                v[..., offset:, :] = tail
+                k = k[..., :offset, :]
+                v = v[..., :offset, :]
+
+                ref = mlx_ref_attn(q, k, v, scale=scale, mask="causal")
+                out = mx.fast.scaled_dot_product_attention(
+                    q, k, v, scale=scale, mask="causal"
+                )
+                self.assertFalse(mx.isnan(out).any())
+                self.assertTrue(mx.allclose(ref, out, rtol=1e-3, atol=1e-3))
+
 
 if __name__ == "__main__":
     mlx_tests.MLXTestRunner(failfast=True)

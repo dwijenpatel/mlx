@@ -462,14 +462,22 @@ void sdpa_vector_2pass(
     bool do_causal,
     const std::optional<array>& mask,
     const std::optional<array>& sinks) {
+  // Compute the necessary sizes
+  int gqa_factor = q.shape(1) / k.shape(1);
+
   // Set the kernel name
   std::string kname;
   kname.reserve(64);
   kname += "sdpa_vector_2pass_1";
-  if (!mask && !sinks && q.shape(2) == 1 && q.shape(1) == 8 * k.shape(1) &&
-      q.shape(-1) == v.shape(-1) && (q.shape(-1) == 64 || q.shape(-1) == 128) &&
-      k.shape(2) >= 8192) {
-    kname += "_gqa";
+  const int qk_dim = q.shape(-1);
+  if (!mask && !sinks && q.shape(2) == 1 && gqa_factor == 8 &&
+      q.shape(-1) == v.shape(-1) &&
+      (qk_dim == 64 || qk_dim == 128 || qk_dim == 256) && k.shape(2) >= 8192) {
+    // Heads per thread: sized so the partials buffer (G * HPT * V floats)
+    // stays within the 32 KB threadgroup memory limit.
+    const int hpt = qk_dim == 64 ? 8 : (qk_dim == 128 ? 4 : 2);
+    kname += "_gqa8_hpt";
+    kname += std::to_string(hpt);
   }
   kname += "_";
   kname += get_type_string(q.dtype());
@@ -477,9 +485,6 @@ void sdpa_vector_2pass(
   kname += std::to_string(q.shape(-1));
   kname += "_";
   kname += std::to_string(v.shape(-1));
-
-  // Compute the necessary sizes
-  int gqa_factor = q.shape(1) / k.shape(1);
   int n_simds = gqa_factor * q.shape(2);
 
   char devc = d.get_architecture().back();
